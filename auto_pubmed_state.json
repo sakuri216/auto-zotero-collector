@@ -1,0 +1,64 @@
+{
+  "last_run": "2026-02-05T03:17:53.859309",
+  "topics": {
+    "PMC_20Eonly_Vg_Lep": {
+      "processed_pmids": [
+        "41592686"
+      ],
+      "last_update": "2026-02-05T03:17:40.442916"
+    },
+    "PMC_JHonly_Vg_Lep": {
+      "processed_pmids": []
+    },
+    "PMC_LifeHistory_Vg_Lep": {
+      "processed_pmids": [
+        "41629019",
+        "41616027",
+        "41592686",
+        "41461436"
+      ],
+      "last_update": "2026-02-05T03:17:41.439526"
+    },
+    "PMC_Ovary_Repro_Vg_Lep": {
+      "processed_pmids": [
+        "41199508"
+      ],
+      "last_update": "2026-02-05T03:17:44.412118"
+    },
+    "PMC_Nutrition_Hormone_Vg_Lep": {
+      "processed_pmids": [
+        "41592686"
+      ],
+      "last_update": "2026-02-05T03:17:45.068184"
+    },
+    "PMC_Hormone_LifeHistory_Lep": {
+      "processed_pmids": [
+        "41592686",
+        "41486566"
+      ],
+      "last_update": "2026-02-05T03:17:47.716297"
+    },
+    "PMC_Hormone_Ovary_Lep": {
+      "processed_pmids": []
+    },
+    "PMC_Vg_ReproMode_Lep": {
+      "processed_pmids": [
+        "41629019",
+        "41199508"
+      ],
+      "last_update": "2026-02-05T03:17:50.691260"
+    },
+    "PMC_Vg_Ovary_Lep": {
+      "processed_pmids": [
+        "41199508"
+      ],
+      "last_update": "2026-02-05T03:17:51.246932"
+    },
+    "PMC_Vg_Hormone_Lep": {
+      "processed_pmids": [
+        "41592686"
+      ],
+      "last_update": "2026-02-05T03:17:53.859202"
+    }
+  }
+}
