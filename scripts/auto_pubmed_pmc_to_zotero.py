@@ -14,7 +14,7 @@ auto_pubmed_pmc_to_zotero.py
 - requests
 - 环境变量：ZOTERO_USER_ID, ZOTERO_API_KEY
 
-版本：v5.0 - 优化版，支持 GitHub Actions
+版本：v5.1 - 添加全局 PMID 去重，避免跨主题重复导入
 """
 
 import os
@@ -35,7 +35,7 @@ warnings.filterwarnings('ignore', message='Unverified HTTPS request')
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ================= 版本信息 =================
-__version__ = "5.0.0"
+__version__ = "5.1.0"
 
 # ================= 日志设置 =================
 
@@ -175,13 +175,22 @@ TOPICS: List[Dict] = [
 
 def load_state(state_file: str = STATE_FILE) -> Dict:
     if not os.path.exists(state_file):
-        return {"last_run": None, "topics": {}}
+        return {"last_run": None, "topics": {}, "global_pmids": []}
     try:
         with open(state_file, "r", encoding="utf-8") as f:
-            return json.load(f)
+            state = json.load(f)
+            # 兼容旧版本状态文件，添加 global_pmids 字段
+            if "global_pmids" not in state:
+                state["global_pmids"] = []
+                # 从各主题中收集已有的 PMID 到全局列表
+                for topic_name, topic_data in state.get("topics", {}).items():
+                    for pmid in topic_data.get("processed_pmids", []):
+                        if pmid not in state["global_pmids"]:
+                            state["global_pmids"].append(pmid)
+            return state
     except Exception as e:
         logging.error("读取 %s 失败，将重新开始：%s", state_file, e)
-        return {"last_run": None, "topics": {}}
+        return {"last_run": None, "topics": {}, "global_pmids": []}
 
 
 def save_state(state: Dict, state_file: str = STATE_FILE) -> None:
@@ -321,20 +330,35 @@ def process_topic(topic: Dict, state: Dict, days_back: int, retmax: int, dry_run
     collection = topic["collection"]
     query = topic["query"]
 
+    # 获取主题级别的已处理 PMID
     topic_state = state.setdefault("topics", {}).setdefault(name, {"processed_pmids": []})
-    processed: List[str] = topic_state.get("processed_pmids", [])
-    processed_set = set(processed)
+    topic_processed: List[str] = topic_state.get("processed_pmids", [])
+    topic_processed_set = set(topic_processed)
+
+    # 获取全局已处理 PMID（跨主题去重）
+    global_pmids: List[str] = state.setdefault("global_pmids", [])
+    global_pmids_set = set(global_pmids)
 
     logging.info("=== 主题: %s ===", name)
     logging.debug("  Query: %s", query[:100] + "...")
 
     pmids = esearch_pubmed(query, days_back=days_back, retmax=retmax)
     total_found = len(pmids)
-    logging.info("  已记录的 PMID 数: %d", len(processed_set))
+    logging.info("  已记录的 PMID 数（本主题）: %d", len(topic_processed_set))
+    logging.info("  已记录的 PMID 数（全局）: %d", len(global_pmids_set))
     logging.info("  [PubMed] 检索: days_back=%d, retmax=%d", days_back, retmax)
     logging.info("  PubMed 返回 PMID 数: %d", total_found)
 
-    new_pmids = [p for p in pmids if p not in processed_set]
+    # 使用全局 PMID 集合进行去重，避免跨主题重复
+    new_pmids = [p for p in pmids if p not in global_pmids_set]
+
+    # 统计：本主题新增 vs 全局新增
+    topic_new_pmids = [p for p in pmids if p not in topic_processed_set]
+    skipped_due_to_global = len(topic_new_pmids) - len(new_pmids)
+
+    if skipped_due_to_global > 0:
+        logging.info("  跳过 %d 篇（已被其他主题采集）", skipped_due_to_global)
+
     if not new_pmids:
         logging.info("  没有新的 PMID（都已处理过）")
         return total_found, 0, 0
@@ -350,8 +374,13 @@ def process_topic(topic: Dict, state: Dict, days_back: int, retmax: int, dry_run
     written = push_to_zotero(items, dry_run=dry_run)
 
     if written > 0 and not dry_run:
-        topic_state["processed_pmids"] = processed + new_pmids
+        # 更新主题级别的已处理列表
+        topic_state["processed_pmids"] = topic_processed + new_pmids
         topic_state["last_update"] = datetime.now().isoformat()
+
+        # 更新全局已处理列表
+        state["global_pmids"] = global_pmids + new_pmids
+
         logging.info("  本次成功写入 Zotero 条目数: %d", written)
     elif dry_run:
         logging.info("  [预览模式] 本次将写入 Zotero 条目数: %d", written)
@@ -370,6 +399,10 @@ def show_status(state: Dict):
 
     last_run = state.get("last_run", "从未运行")
     print(f"\n最后运行时间: {last_run}")
+
+    # 显示全局去重统计
+    global_pmids = state.get("global_pmids", [])
+    print(f"全局已采集论文数（去重后）: {len(global_pmids)}")
 
     topics_state = state.get("topics", {})
     if not topics_state:
@@ -391,7 +424,8 @@ def show_status(state: Dict):
         total_collected += count
 
     print("-" * 65)
-    print(f"{'总计':<35} {total_collected:<10}")
+    print(f"{'各主题累计（含重复）':<35} {total_collected:<10}")
+    print(f"{'实际采集（全局去重）':<35} {len(global_pmids):<10}")
     print("=" * 60 + "\n")
 
 # ================= 列出主题 =================
