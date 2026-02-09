@@ -14,7 +14,7 @@ auto_pubmed_pmc_to_zotero.py
 - requests
 - 环境变量：ZOTERO_USER_ID, ZOTERO_API_KEY
 
-版本：v5.1 - 添加全局 PMID 去重，避免跨主题重复导入
+版本：v5.2 - 添加层级集合管理（父主题/子主题/日期）
 """
 
 import os
@@ -35,7 +35,7 @@ warnings.filterwarnings('ignore', message='Unverified HTTPS request')
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ================= 版本信息 =================
-__version__ = "5.1.0"
+__version__ = "5.2.0"
 
 # ================= 日志设置 =================
 
@@ -65,8 +65,14 @@ ZOTERO_API_KEY = os.environ.get("ZOTERO_API_KEY")
 
 STATE_FILE = "auto_pubmed_state.json"
 
+# 父集合名称（可自定义）
+ROOT_COLLECTION_NAME = "Auto_PubMed_Collection"
+
 DEFAULT_DAYS_BACK = 30
 DEFAULT_RETMAX = 200
+
+# 集合缓存（避免重复 API 调用）
+_collection_cache: Dict[str, str] = {}
 
 # ================= 创建健壮的 Session =================
 
@@ -245,15 +251,146 @@ def fetch_pubmed_summaries(pmids: List[str]) -> Dict[str, Dict]:
         logging.error("获取 PubMed 摘要失败: %s", e)
         return {}
 
+# ================= Zotero 集合管理 =================
+
+def get_zotero_headers() -> Dict[str, str]:
+    """获取 Zotero API 请求头"""
+    return {
+        "Zotero-API-Key": ZOTERO_API_KEY,
+        "Content-Type": "application/json",
+    }
+
+
+def get_all_collections() -> List[Dict]:
+    """获取所有 Zotero 集合"""
+    if not ZOTERO_USER_ID or not ZOTERO_API_KEY:
+        return []
+
+    url = f"https://api.zotero.org/users/{ZOTERO_USER_ID}/collections"
+    try:
+        r = SESSION.get(url, headers=get_zotero_headers(), timeout=60, verify=False, proxies={"http": None, "https": None})
+        if r.status_code == 200:
+            return r.json()
+        else:
+            logging.error("获取集合列表失败，HTTP %s", r.status_code)
+            return []
+    except requests.exceptions.RequestException as e:
+        logging.error("获取集合列表失败: %s", e)
+        return []
+
+
+def find_collection_by_name(name: str, parent_key: Optional[str] = None) -> Optional[str]:
+    """根据名称查找集合，返回集合 key"""
+    # 先检查缓存
+    cache_key = f"{parent_key or 'root'}:{name}"
+    if cache_key in _collection_cache:
+        return _collection_cache[cache_key]
+
+    collections = get_all_collections()
+    for col in collections:
+        data = col.get("data", {})
+        col_name = data.get("name", "")
+        col_parent = data.get("parentCollection", False)
+
+        # 匹配名称和父集合
+        if col_name == name:
+            if parent_key is None and col_parent is False:
+                # 查找根集合
+                key = data.get("key")
+                _collection_cache[cache_key] = key
+                return key
+            elif parent_key and col_parent == parent_key:
+                # 查找子集合
+                key = data.get("key")
+                _collection_cache[cache_key] = key
+                return key
+
+    return None
+
+
+def create_collection(name: str, parent_key: Optional[str] = None) -> Optional[str]:
+    """创建集合，返回集合 key"""
+    if not ZOTERO_USER_ID or not ZOTERO_API_KEY:
+        return None
+
+    url = f"https://api.zotero.org/users/{ZOTERO_USER_ID}/collections"
+
+    data = [{"name": name}]
+    if parent_key:
+        data[0]["parentCollection"] = parent_key
+
+    try:
+        r = SESSION.post(url, headers=get_zotero_headers(), data=json.dumps(data), timeout=60, verify=False, proxies={"http": None, "https": None})
+        if r.status_code in (200, 201):
+            result = r.json()
+            if "successful" in result and "0" in result["successful"]:
+                key = result["successful"]["0"]["data"]["key"]
+                # 更新缓存
+                cache_key = f"{parent_key or 'root'}:{name}"
+                _collection_cache[cache_key] = key
+                logging.info("  创建集合: %s (key=%s)", name, key)
+                return key
+        logging.error("创建集合失败，HTTP %s: %s", r.status_code, r.text[:200])
+        return None
+    except requests.exceptions.RequestException as e:
+        logging.error("创建集合失败: %s", e)
+        return None
+
+
+def get_or_create_collection(name: str, parent_key: Optional[str] = None) -> Optional[str]:
+    """获取或创建集合"""
+    # 先尝试查找
+    key = find_collection_by_name(name, parent_key)
+    if key:
+        return key
+
+    # 不存在则创建
+    return create_collection(name, parent_key)
+
+
+def get_hierarchical_collection(topic_name: str, date_str: str) -> Optional[str]:
+    """
+    获取层级集合结构，返回日期集合的 key
+
+    结构：
+    Auto_PubMed_Collection（父主题）
+    └── PMC_Vg_Hormone_Lep（子主题）
+        └── 2026-02-05（采集日期）
+    """
+    # 1. 获取或创建根集合
+    root_key = get_or_create_collection(ROOT_COLLECTION_NAME)
+    if not root_key:
+        logging.error("无法创建根集合: %s", ROOT_COLLECTION_NAME)
+        return None
+
+    # 2. 获取或创建主题子集合
+    topic_key = get_or_create_collection(topic_name, root_key)
+    if not topic_key:
+        logging.error("无法创建主题集合: %s", topic_name)
+        return None
+
+    # 3. 获取或创建日期子集合
+    date_key = get_or_create_collection(date_str, topic_key)
+    if not date_key:
+        logging.error("无法创建日期集合: %s", date_str)
+        return None
+
+    return date_key
+
+
 # ================= Zotero 写入 =================
 
-def make_zotero_item(pmid: str, summary: Dict, topic_name: str, collection_key: str) -> Dict:
+def make_zotero_item(pmid: str, summary: Dict, topic_name: str, collection_key: Optional[str] = None) -> Dict:
+    """创建 Zotero 条目，可指定集合"""
     title = summary.get("title", f"PMID {pmid}")
     journal = summary.get("fulljournalname", "")
     pubdate = summary.get("pubdate", "")
     volume = summary.get("volume", "")
     issue = summary.get("issue", "")
     pages = summary.get("pages", "")
+
+    # 设置集合
+    collections = [collection_key] if collection_key else []
 
     item = {
         "itemType": "journalArticle",
@@ -285,7 +422,7 @@ def make_zotero_item(pmid: str, summary: Dict, topic_name: str, collection_key: 
             {"tag": "auto:pubmed"},
             {"tag": f"topic:{topic_name}"},
         ],
-        "collections": [],
+        "collections": collections,
         "relations": {},
     }
     return item
@@ -327,7 +464,6 @@ def push_to_zotero(items: List[Dict], dry_run: bool = False) -> int:
 
 def process_topic(topic: Dict, state: Dict, days_back: int, retmax: int, dry_run: bool = False) -> Tuple[int, int, int]:
     name = topic["name"]
-    collection = topic["collection"]
     query = topic["query"]
 
     # 获取主题级别的已处理 PMID
@@ -365,11 +501,21 @@ def process_topic(topic: Dict, state: Dict, days_back: int, retmax: int, dry_run
 
     logging.info("  本次新的 PMID 数: %d", len(new_pmids))
 
+    # 获取层级集合（父主题/子主题/日期）
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    collection_key = None
+    if not dry_run:
+        collection_key = get_hierarchical_collection(name, today_str)
+        if collection_key:
+            logging.info("  目标集合: %s/%s/%s", ROOT_COLLECTION_NAME, name, today_str)
+        else:
+            logging.warning("  无法创建层级集合，论文将添加到根目录")
+
     summaries = fetch_pubmed_summaries(new_pmids)
     items = []
     for pmid in new_pmids:
         summary = summaries.get(pmid, {})
-        items.append(make_zotero_item(pmid, summary, name, collection))
+        items.append(make_zotero_item(pmid, summary, name, collection_key))
 
     written = push_to_zotero(items, dry_run=dry_run)
 
